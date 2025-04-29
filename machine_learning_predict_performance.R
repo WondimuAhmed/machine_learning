@@ -1,0 +1,1068 @@
+
+  Using Machine Learning to Predict Science Performance
+
+
+
+  
+  ```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,  comment = NA)
+```
+
+# Project Overview 
+
+The purpose of this project is to apply machine learning to identify the most important and potentially malleable predictors of science performance among nationally representative 15-year-old students in the USA using data from the 2015 Program for International Student Assessment (PISA).  Given the increasing importance of science education in a knowledge-based economy, the goal is to provide actionable insights for educators, policymakers, and researchers seeking to improve science education.
+
+
+
+```{r load-packages, echo=FALSE}
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman"); pacman::p_load(naniar, tidyverse, readr, psych, DataExplorer, tidymodels, caret, ranger, e1071,haven, randomForest, NeuralNetTools, performance, mice, rpart.plot, rpart, DT, virdis , plotly,networkD3, missForest,gbm, reshape2, nnet, viridis)
+
+```
+
+# Data Source
+
+This project used data from PISA 2015- a triennial international student assessment administered by the OECD. The [dataset](https://nces.ed.gov/pubsearch/pubsinfo.asp?pubid=2017120) offers comprehensive information on student performance in science alongside rich contextual data on school, teaching and learning processes, and student characteristics.  The U.S. subsample consisted of 5,712 students and is nationally representative of 15-year-old students. For those interested in reproducing this analysis, please consult the official [ReadMe documentation](https://nces.ed.gov/pubs2017/2017120_ReadMe.pdf) and the accompanying [Illustrative Merge Code](https://nces.ed.gov/pubs2017/2017120_IllustrativeMergeCode.pdf) provided by the National Center for Education Statistics (NCES).
+
+
+
+
+
+# Data Preparation
+
+A total of 91 variables were selected for analysis. The selection process was guided by findings from large-scale reviews that emphasize the roles of motivation (Zhang & Bae, 2020), student characteristics (Kyriakides et al., 2018), teacher and school leadership practices (Hitt & Tucker, 2016), and instructional quality (Hattie, 2012). Moreover, Bronfenbrenner’s bioecological model of human development was used as a framework (Bronfenbrenner & Morris, 2007). A detailed description of all variables is available in the [PISA 2015 Assessment and Analytical Framework](https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://www.oecd.org/content/dam/oecd/en/publications/reports/2016/04/pisa-2015-assessment-and-analytical-framework_g1g66e6f/9789264255425-en.pdf&ved=2ahUKEwjsjavkw9-MAxXDGtAFHfYcNOQQFnoECCIQAQ&usg=AOvVaw3hBf2sqGZX1zii4_WlA0dP).
+
+
+```{r read-data, echo= FALSE}
+ml_data <- read_sav("PISA_USA_School_Student_Merged.SAV") 
+```
+
+
+```{r data-subsetting-explicit, echo=FALSE}
+
+# NOTE: I used explicit variable names rather than numeric column indices. I think this enhances reproducibility by making the code resilient to changes in column order
+
+# I selected only relevant columns 
+
+ml_data <- ml_data %>%
+  dplyr::select(
+    # IDs and demographic vars
+    CNTSCHID, CNTSTUID, ST004D01T, AGE, GRADE, IMMIG,
+    
+    # Student-level variables
+    DISCLISCI, TEACHSUP, IBTEACH, TDTEACH, ENVAWARE, ENVOPT, JOYSCIE, INTBRSCI,
+    INSTSCIE, SCIEEFF, EPIST, SCIEACT, BSMJ, HOMESCH, ENTUSE, REPEAT, DURECEC,
+    OUTHOURS, SMINS, BELONG, ANXTEST, MOTIVAT, COOPERATE, CPSVALUE, EMOSUPS,
+    PERFEED, ADINST, SCCHANGE, CHANGE, SADDINST, HADDINST, ADDSCIIN, COMSCSUP,
+    COMSCSTRLE, COMSCSTRCO, COMSCTSREL, COMMASUP, COMMASTRLE, COMMASTRCO,
+    COMMATSREL, USESCH, INTICT, COMPICT, AUTICT, SOIAICT, ICTHOME, ICTSCH,
+    PRESUPP, CURSUPP, EMOSUPP, PQSCHOOL, PASCHPOL, PQGENSCI, PQENPERC, PQENVOPT,
+    unfairteacher,PV1SCIE,ESCS,
+    ST038Q01NA, ST038Q02NA, ST038Q03NA, ST038Q04NA,
+    ST038Q05NA, ST038Q06NA, ST038Q07NA, ST038Q08NA,
+    
+    # School-level variables
+    SCHSIZE, CLSIZE, RATCMP1, RATCMP2,
+    LEAD, LEADCOM, LEADINST, LEADPD, LEADTCH, RESPCUR, RESPRES,
+    SCHAUT, TEACHPART,
+    EDUSHORT, STAFFSHORT, PROAT5AB, PROAT5AM, PROAT6, PROATCE, 
+    PROSTAT, PROSTCE, PROSTMAS, CREACTIV, SCIERES,
+    STUBEHA, TEACHBEHA, STRATIO, FRPL, PUBPRIV
+  ) %>%
+  
+  # Create composite variable for peer victimization and drop individual items. PISA 2015 dataset does not contain index variable for peer victimization 
+  
+  mutate(
+    BULLIED = rowMeans(across(ST038Q01NA:ST038Q08NA), na.rm = TRUE)
+  ) %>%
+  dplyr::select(-starts_with("ST038Q")) %>%
+  # Rename variables for consistency with naming conventions in PISA
+  rename(
+    GENDER = ST004D01T,
+    UNFAIRTEACHER = unfairteacher
+  )
+
+
+```
+
+
+## Data Cleaning 
+
+The amount of missing data directly affects the validity of statistical conclusions. Although there is no universally agreed-upon standard in the literature for acceptable levels of missingness, Bennett (2001) suggests that analyses can become biased when more than 10% of the data are missing. Twenty-four variables with 100% missing data—those not administered to students in the United States—were excluded from the dataset. Initial inspection of the data indicated that certain factor variables were represented as numeric. These variables were recoded as factors.  In addition, The FRPL(Free of reduced lunch) variable was further re-categorized to align with classifications commonly used in educational research based on the National Center for Education Statistics (NCES) guidelines.
+
+```{r filter-and-viz-missing data, echo=FALSE}
+# Importing via 'haven' means that the dataset retains some metadata from its original SPSS or similar format. To completely remove these attributes, including variable labels, value lables and formatting, we use a combination of functions : zap_labels(),zap_label(), zap_formats(), and zap_widths() from the haven package.
+ml_data <- ml_data %>%
+  zap_labels() %>%             
+  zap_label() %>%         
+  zap_formats() %>%    
+  zap_widths()      
+
+
+# Filter out variables with 100% missing , These are variable that are not assessed in the USA in PISA 2015
+
+ml_data <- ml_data %>%
+  dplyr::select(where(~ mean(is.na(.)) < 1.0))
+
+
+# Filter out variables with 10% or more missing data, While there is no universal cutoff for acceptable levels of missingness, several authors suggest that when missing data exceeds 10%, imputation or analysis results may become unreliable (Bennett, 2001)
+ml_data <- ml_data %>%
+  dplyr::select(where(~ mean(is.na(.)) < 0.10))
+
+
+missing_percentage <- ml_data %>%
+  summarise(across(everything(), ~ mean(is.na(.)) * 100)) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Percent_Missing")  %>% arrange(desc(Percent_Missing))
+
+
+# Inspection of the structure shows that some factor variables presented as numeric which is not accurate.  let's recode these vars
+
+ml_data<- ml_data %>%
+  mutate(
+    PUBPRIV = as.factor(PUBPRIV),
+    GENDER = as.factor(GENDER),
+    REPEAT = as.factor(REPEAT),
+    FRPL = as.factor(FRPL),
+    IMMIG = as.factor(IMMIG)) %>%  
+  mutate(FRPL= recode(FRPL, "1"="1", "2"="1", "3"="2", "4"="3", "5"="4")) 
+
+# "Low-poverty schools are defined as public schools where 25.0 percent or less of the students are eligible for free or reduced-price lunch (FRPL); mid-low poverty schools are those where 25.1 to 50.0 percent of the students are eligible for FRPL; mid-high poverty schools are those where 50.1 to 75.0 percent of the students are eligible for FRPL"  https://nces.ed.gov/fastfacts/display.asp?id=898#:~:text=District%20of%20Columbia.-,Low%2Dpoverty%20schools%20are%20defined%20as%20public%20schools%20where%2025.0,to%2075.0%20percent%20of%20the
+```
+
+
+The bar plots below show that the majority of variables have low levels of missing data, with most features missing less than 5% of observations.
+
+```{r viz_pct_missing1, echo=FALSE}
+# Visualize percent missing 
+plot_missing(ml_data [,3:28])
+```
+
+
+```{r viz_pct_missing2, echo=FALSE}
+# Visualize percent missing1
+plot_missing(ml_data [,29:49])
+```
+
+
+## Data Structure 
+
+A review of variable types revealed that 89.8% of the columns are continuous (numeric) and 10.2% are discrete (categorical). The plot below provides an interactive overview of variable types. Hovering over nodes reveals key metadata. 
+
+```{r visualize-data-structure, echo= FALSE}
+#introduce(ml_data)
+# plot_intro(ml_data)
+networkD3::diagonalNetwork(plot_str(ml_data[, 3:49])) #* plot_str() does not return a ggplot — it returns a nested list structure that is automatically rendered using networkD3::diagonalNetwork() When knitting R Markdown documents using rmdformats::readthedown. The default plot_str(df) call does not render properly in the knitted HTML
+```
+
+
+
+## Data Exploration
+
+**Descriptive statistics** revealed that most continuous variables are approximately normally distributed with several showing mild to moderate skewness.
+
+```{r descriptive-statistics, echo=FALSE}
+# Generate descriptive statistics, round them, and display in an interactive table
+ml_data[, 3:49] %>%
+  describe() %>%
+  round(3) %>%
+  datatable(options = list(pageLength = 10))
+
+```
+
+The **histograms** below provide a visual summary of the distribution of selected variables in the dataset.
+
+```{r Histograms-select-vars, echo= FALSE}
+
+# Select Some numeric variables for visualization
+vars_for_plot <- c("DISCLISCI", "TEACHSUP", "ENVAWARE", "JOYSCIE", "INSTSCIE", "ANXTEST", "CPSVALUE", "CLSIZE", "MOTIVAT", "EPIST", "EMOSUPS",  "SCIEEFF")
+
+# Histograms
+ml_data %>%
+  select(all_of(vars_for_plot )) %>%
+  pivot_longer(everything()) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  facet_wrap(~name, scales = "free") +
+  theme_minimal() +
+  labs(title = "Histograms of Selected Variables")
+
+```
+
+The two **correlation heatmaps** below provide an overview of the relationships among the predictor variables (features) and science performance [ Warmer colors indicate stronger associations, while cooler tones reflect weaker associations]. The first heatmap (Set 1) shows that most of the correlations are positive but modest in strength. The second heatmap (Set 2) highlights  highly intercorrelated school level variables but thier direct correlations with science performance  appear relatively weak. 
+
+```{r correlation-matrix-and-heat_map1, echo=FALSE}
+cor_data1 <- ml_data[, c( 3:25, 26)]
+cor_data1 <- cor_data1 %>% rename(SCIENCESCORE = PV1SCIE ) 
+cor_data1 <- cor_data1 [, sapply(cor_data1 , is.numeric)]
+
+cor_matrix1 <- cor(cor_data1, use = "pairwise.complete.obs")
+
+cor_melted1 <- melt(cor_matrix1)
+cor_melted1 <-as.data.frame(cor_melted1 )
+
+corr_plot1 <- ggplot(data = cor_melted1, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1, 1), space = "Lab", 
+                       name = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  labs(title = "Heatmap of Correlations [Set1]",
+       x = "", y = "Variables")
+corr_plot1
+```
+
+
+```{r correlation-matrix-and-heat_map2, echo=FALSE}
+
+cor_data2 <- ml_data[, c( 27:49, 26)]
+cor_data2 <- cor_data2 %>% rename(SCIENCESCORE = PV1SCIE ) 
+cor_data2 <- cor_data2 [, sapply(cor_data2 , is.numeric)]
+
+cor_matrix2 <- cor(cor_data2, use = "pairwise.complete.obs")
+
+cor_melted2 <- melt(cor_matrix2)
+cor_melted2 <-as.data.frame(cor_melted2 )
+
+corr_plot2 <- ggplot(data = cor_melted2, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1, 1), space = "Lab", 
+                       name = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  labs(title = "Heatmap of Correlations [Set2]",
+       x = "", y = "Variables")
+
+corr_plot2 
+
+```
+
+
+
+
+
+## Data Spliting
+
+The dataset was partitioned into **training** (4,000) and **test** (1,712 ) sets. The histogram below shows that the split preserved the distribution of Science Score across both subsets.  To prevent **data leakage** all preprocessing steps were applied independently to each dataset. 
+
+```{r data-spliting, echo=FALSE}
+
+ml_data <- ml_data %>% rename(Science_Score = PV1SCIE ) %>% dplyr::select (- c(1:2))  # Rename PVSCIENCE , and remove id vars
+
+# Define the target variable
+target <- "Science_Score" 
+# Select all columns except the target
+X <- ml_data %>% dplyr::select(-all_of(target))  # Features
+y <- ml_data %>% pull(all_of(target))     # Target variable
+
+
+#  Split into training (70%) and test(30%) sets
+set.seed(42)  # For reproducibility
+train_index <- createDataPartition(y, p = 0.7, list = FALSE)
+
+X_train <- X[train_index, ]
+X_test <- X[-train_index, ]
+y_train <- y[train_index]
+y_test <- y[-train_index]
+
+
+# Combine features and target for convenience (optional)
+train_data <- cbind(X_train, Science_Score = y_train)
+test_data <- cbind(X_test, Science_Score = y_test)
+
+
+```
+
+
+```{r visualization-of-splits, echo=FALSE}
+
+# Combine data for visualization
+train_test_data <- data.frame(
+  Set = c(rep("Train", length(y_train)), rep("Test", length(y_test))),
+  ScienceScore = c(y_train, y_test)
+)
+
+# Plot distribution of the Science Scores 
+ggplot(train_test_data, aes(x = ScienceScore, fill = Set)) +
+  geom_histogram(binwidth = 10, position = "dodge", alpha = 0.7) +
+  labs(title = "Distribution of Science Scores in Train and Test Sets",
+       x = "Science Score", y = "Frequency") +
+  theme_minimal()
+
+```
+
+
+
+# Feature Engineering: Training Data
+
+To prepare the training data for modeling, a series of feature engineering steps were applied:
+  
+  - Missing values were imputed using the [MissForest package](https://cran.r-project.org/web/packages/missForest/index.html).
+- All numeric predictors were centered and scaled.
+- Categorical variables were transformed using one-hot encoding. 
+- Features with near-zero variance were removed
+- Highly correlated features were filtered.
+
+```{r impute-missing-values-train, message=FALSE, warning=FALSE, error=FALSE,results='hide',echo= FALSE}
+imp_train_data <- missForest(train_data, verbose = TRUE)
+imputed_data <- imp_train_data$ximp
+
+train_data_imp <- imp_train_data$ximp
+train_data <- train_data_imp
+
+```
+
+```{r, feature-scaling-train,  message=FALSE, warning=FALSE, error=FALSE,results='hide', echo =FALSE}
+target <- "Science_Score"
+
+train_features <- train_data %>% dplyr::select(-all_of(target))
+train_target <- train_data[[target]]
+
+preprocess_params <- preProcess(train_features, method = c("center", "scale"))
+
+train_features_scaled <- predict(preprocess_params, train_features)
+train_data_scaled <- cbind(train_features_scaled, Science_Score = train_target)
+
+```
+
+
+```{r creating-dummy-vars-train,  message=FALSE, warning=FALSE, error=FALSE,results='hide', echo= FALSE}
+df_dmy <- dummyVars(" ~ .", data = train_data_scaled, fullRank=T)
+train_data_clean <- data.frame(predict(df_dmy, newdata = train_data_scaled))
+```
+
+```{r removing-near-zero-variance-predictors-train,  message=FALSE, warning=FALSE, error=FALSE,results='hide', echo= FALSE}
+
+nzv <- nearZeroVar(train_data_clean, saveMetrics= TRUE)
+nzv[nzv$nzv,][1:10,]
+
+# Remove non zero variance , RATCMP2 Proportion of available computers that are connected to the Internet, this is related to RATCMP1 Number of available computers per student at modal grade
+
+train_data_clean <- train_data_clean %>% dplyr::select(-RATCMP2)
+
+```
+
+
+
+```{r remove-highly-correlated-features-train, message=FALSE, warning=FALSE, error=FALSE,results='hide', echo=FALSE}
+
+# Compute the correlation matrix, identify highly correlated columns and remove
+corr_mat <- train_data_clean %>%
+  dplyr::select(1:49) %>%
+  cor()
+
+high_corr <- sum(abs(corr_mat[upper.tri(corr_mat)]) > 0.80)
+print(high_corr)
+
+summary(corr_mat[upper.tri(corr_mat)])
+
+
+highly_correlated <- findCorrelation(corr_mat, cutoff = 0.80)
+highly_correlated
+
+# Two variables: class size and Shortage of Educators were removed 
+train_data_clean <- train_data_clean %>%
+  dplyr::select(-all_of(highly_correlated))
+```
+
+
+```{r remove-linear-dependencies-train,  message=FALSE, warning=FALSE, error=FALSE,results='hide', echo=FALSE}
+
+# None of the variables are linear combinations of other variables in the dataset. 
+comboInfo <- findLinearCombos(train_data_clean)
+
+```
+
+# Feature Engineering: Testing Data
+
+The same preprocessing steps applied to the training data were replicated on the testing data. As noted above, this was done to prevent **data leakage**.
+
+```{r impute-missing-values-test, message=FALSE, warning=FALSE, error=FALSE,results='hide',echo= FALSE}
+imp_test_data <- missForest(test_data, verbose = TRUE)
+imputed_data <- imp_test_data$ximp
+
+test_data_imp <- imp_test_data$ximp
+test_data <- test_data_imp
+
+```
+
+```{r, feature-scaling-test, message=FALSE, warning=FALSE, error=FALSE,results='hide', echo =FALSE}
+target <- "Science_Score"
+
+test_features <- test_data %>% dplyr::select(-all_of(target))
+test_target <- test_data[[target]]
+
+preprocess_params <- preProcess(test_features, method = c("center", "scale"))
+
+test_features_scaled <- predict(preprocess_params, test_features)
+test_data_scaled <- cbind(test_features_scaled, Science_Score = test_target)
+
+```
+
+
+```{r creating-dummy-vars-test, message=FALSE, warning=FALSE, error=FALSE,results='hide', echo= FALSE}
+df_dmy <- dummyVars(" ~ .", data = test_data_scaled, fullRank=T)
+test_data_clean <- data.frame(predict(df_dmy, newdata = test_data_scaled))
+```
+
+```{r removing-near-zero-variance-predictors-test, message=FALSE, warning=FALSE, error=FALSE,results='hide', echo= FALSE}
+
+nzv <- nearZeroVar(test_data_clean, saveMetrics= TRUE)
+nzv[nzv$nzv,][1:10,]
+
+# Remove non zero variance , RATCMP2 Proportion of available computers that are connected to the Internet, this is related to RATCMP1 Number of available computers per student at modal grade
+
+test_data_clean <- test_data_clean %>% dplyr::select(-RATCMP2)
+
+```
+
+```{r remove-highly-correlated-features-test,  message=FALSE, warning=FALSE, error=FALSE,results='hide',echo=FALSE}
+
+# Compute the correlation matrix, identify highly correlated columns and remove
+corr_mat <- test_data_clean %>%
+  dplyr::select(1:49) %>%
+  cor()
+
+high_corr <- sum(abs(corr_mat[upper.tri(corr_mat)]) > 0.80)
+print(high_corr)
+
+summary(corr_mat[upper.tri(corr_mat)])
+
+
+highly_correlated <- findCorrelation(corr_mat, cutoff = 0.80)
+highly_correlated
+
+# Two variables: class size and Shortage of Educators were removed 
+test_data_clean <- test_data_clean %>%
+  dplyr::select(-all_of(highly_correlated))
+```
+
+
+```{r remove-linear-dependencies-test, message=FALSE, warning=FALSE, error=FALSE,results='hide', echo=FALSE}
+
+# None of the variables are linear combinations of other variables in the dataset. 
+comboInfo <- findLinearCombos(test_data_clean)
+
+```
+
+# Model Training 
+
+Five machine learning models [i.e., Decision Tree (DT), Random Forest (RF), Support Vector Machine (SVM), Gradient Boosting Machine (GBM), and Artificial Neural Network (ANN)] were trained on the preprocessed training dataset to predict science performance. Each model was evaluated on the test set using Root Mean Squared Error (RMSE), Mean Absolute Error (MAE), R-squared (R²), and Mean Squared Log Error (MSLE). 
+
+## Decision Tree 
+
+The decision tree below shows that science scores are higher among students with strong epistemological beliefs, higher socioeconomic status (ESCS), and positive views on collaboration (CPSVALUE). Lower scores are linked to low study time (SMINS), grade repetition, and poor disciplinary climate. 
+
+```{r decision-trees-train, echo= FALSE}
+
+# Build the decision tree model
+tree_model <- rpart(Science_Score ~ ., data = train_data_clean, method = "anova")
+
+# Visualize the decision tree 
+rpart.plot(tree_model, main = "Decision Tree")
+
+# Make predictions on the testing set
+predictions <- predict(tree_model, newdata = test_data_clean)
+
+# Evaluate the model performance: RMSE,MAE, R-squared & MSLE
+tree_model_rmse <- sqrt(mean((predictions - test_data_clean$Science_Score) ^ 2))
+tree_model_mae <- mean(abs(predictions - test_data_clean$Science_Score))
+tree_model_r_squared <- cor(predictions, test_data_clean$Science_Score)^2
+tree_model_msle <- mean((log(predictions + 1) - log(test_data_clean$Science_Score + 1))^2)
+
+```
+
+
+## Random Forest 
+
+This plot illustrates the relationship between the number of trees in the random forest model and the corresponding mean squared error (MSE). As the number of trees increases, the MSE declines sharply at first and then gradually stabilizes. This indicates improved model performance with more trees. Beyond approximately 150 trees, the error rate levels off, suggesting that additional trees provide minimal gains in predictive accuracy. 
+
+```{r random-forest-train,  echo= FALSE}
+# Build the random forest model
+
+rf_model <- randomForest(Science_Score ~ ., data = train_data_clean, ntree = 500, importance = TRUE)
+
+
+
+# Make predictions on the testing set
+predictions <- predict(rf_model, newdata = test_data_clean)
+
+# Evaluate the model performance: RMSE,MAE, R-squared & MSLE
+rf_model_rmse <- sqrt(mean((predictions - test_data_clean$Science_Score) ^ 2))
+rf_model_mae <- mean(abs(predictions - test_data_clean$Science_Score))
+rf_model_r_squared <- cor(predictions, test_data_clean$Science_Score)^2
+rf_model_msle <- mean((log(predictions + 1) - log(test_data_clean$Science_Score + 1))^2)
+
+
+
+mse <- rf_model$mse
+
+# Create data frame
+mse_df <- data.frame(
+  Trees = 1:length(mse),
+  MSE = mse
+)
+
+# Plot MSE 
+ggplot(mse_df, aes(x = Trees, y = MSE)) +
+  geom_line(color = "purple") +
+  labs(
+    title = "Mean Squared Error vs Number of Trees",
+    x = "Number of Trees",
+    y = "Mean Squared Error (MSE)"
+  ) +
+  theme_minimal()
+```
+
+
+
+
+## Support Vector Machines
+
+This plot dsiplays the relationship between the cost parameter (C) and the Root Mean Squared Error (RMSE).  The model achieves the lowest RMSE at a cost value of approximately 0.5, indicating optimal predictive performance. Increasing the cost beyond this point results in higher RMSE.  This analysis helped us in selecting a moderate cost value to balance bias and variance.
+
+
+```{r support-vector-machines(SVM), echo= FALSE}
+# Build the SVM model
+svm_model <- train(
+  Science_Score ~ ., data = train_data_clean,  
+  method = "svmRadial")
+# Make predictions on the testing set
+predictions <- predict(svm_model, newdata = test_data_clean)
+
+
+# Evaluate the model performance
+#RMSE, or root mean squared erro
+svm_model_rmse <- sqrt(mean((predictions - test_data_clean$Science_Score) ^ 2))
+#Mean absolute error (MAE), 
+svm_model_mae <- mean(abs(predictions - test_data_clean$Science_Score))
+#coefficient of determination (R-squared)
+svm_model_r_squared <- cor(predictions, test_data_clean$Science_Score)^2
+#mean squared logarithmic error (MSLE
+svm_model_msle <- mean((log(predictions + 1) - log(test_data_clean$Science_Score + 1))^2)
+
+plot(svm_model)
+
+```
+
+
+
+## Gradient Boosting Machine
+
+The plot displays the squared error loss versus the number of iterations. The black line represents the training error, while the green line shows the validation error. Both errors decrease rapidly at first, but the validation error plateaus after around 200 iterations, while the training error continues to decline. This indicates the point at which additional iterations yield diminishing returns on validation performance. 
+
+```{r gradient-boosting-machine, message=FALSE, warning=FALSE, error=FALSE,results='hide',  echo= FALSE}
+# Build the gradient boosting model
+gbm_model <- gbm(Science_Score ~ ., data = train_data_clean, n.trees = 1000, interaction.depth = 3, shrinkage = 0.1)
+
+# Make predictions on the testing set
+predictions <- predict(gbm_model, newdata = test_data_clean, n.trees = 1000)
+
+# Evaluate the model performance
+gbm_model_rmse <- sqrt(mean((predictions - test_data_clean$Science_Score) ^ 2))
+gbm_model_mae <- mean(abs(predictions - test_data_clean$Science_Score))
+gbm_model_r_squared <- cor(predictions, test_data_clean$Science_Score)^2
+gbm_model_msle <- mean((log(predictions + 1) - log(test_data_clean$Science_Score + 1))^2)
+gbm_model_rmse
+gbm_model_mae
+gbm_model_r_squared
+gbm_model_msle
+
+# Check performance using 5-fold cross-validation
+# Build the gradient boosting model
+gbm_model_plt <- gbm(Science_Score ~ ., data = train_data_clean, n.trees = 1000, interaction.depth = 3, cv.folds = 5, shrinkage = 0.1)
+```
+
+
+```{r, gbm-model-plot, echo=FALSE}
+# Make predictions on the testing set
+best.iter <- gbm.perf(gbm_model_plt, method = "cv")
+
+```
+
+
+## Artificial Neural Network 
+
+The neural network diagram below shows a multilayer perceptron model with 10 input variables [Plotting all features would create a cluttered and less interpretable diagram], 5 hidden nodes, and one output node. The thickness of the connections represents the weight magnitude—thicker lines indicate stronger influence. Two bias nodes (B1 for the hidden layer and B2 for the output layer) are also included
+
+```{r neural-networks, message=FALSE, warning=FALSE, error=FALSE,results='hide', echo= FALSE}
+# Build the ANN model
+ann_model <- nnet(Science_Score ~ ., data = train_data_clean, linout = TRUE, size = 5, decay = 0.1, maxit = 500)
+
+# Make predictions on the testing set
+predictions <- predict(ann_model, newdata = test_data_clean, type = "raw")
+
+
+# Evaluate the model performance
+
+ann_model_rmse <- sqrt(mean((predictions - test_data_clean$Science_Score) ^ 2))
+ann_model_mae <- mean(abs(predictions - test_data_clean$Science_Score))
+ann_model_r_squared <- cor(predictions, test_data_clean$Science_Score)^2
+ann_model_msle <- mean((log(predictions + 1) - log(test_data_clean$Science_Score + 1))^2)
+
+ann_model_rmse
+ann_model_mae
+ann_model_r_squared
+ann_model_msle
+
+
+# Subset top 10 vars for viz only
+top10 <- train_data_clean %>% dplyr::select(c("Science_Score","EPIST", "ESCS", "ENVOPT", "ENVAWARE", "SMINS", "DISCLISCI", "CPSVALUE", "ANXTEST", "JOYSCIE", "SCIEACT")
+)
+ann_model1 <- nnet(Science_Score ~ ., data = top10, linout = TRUE, size = 5, decay = 0.1, maxit = 500)
+
+# Calculate residuals
+residuals <- test_data_clean$Science_Score - predictions
+
+# Residual sum of squares (SS_res)
+ss_res <- sum(residuals^2)
+
+# Total sum of squares (SS_tot)
+ss_tot <- sum((test_data_clean$Science_Score - mean(test_data_clean$Science_Score))^2)
+
+# R-squared
+ann_model_r_squared <- 1 - (ss_res / ss_tot)
+
+
+```
+
+```{r plot-ann-top10, echo=FALSE}
+plotnet(ann_model1,skip = TRUE, nid=TRUE,struct = struct)
+
+```
+
+
+
+
+# Model Assessment
+
+The table below shows that GBM model achieved the lowest RMSE and MSLE, along with the highest R². RF and SVM also performed well, but DT and ANN while interpretable and flexible respectively, exhibited higher prediction errors and explained less variance in  science performance.
+
+```{r, echo= FALSE}
+#ModelName <- c("DT", "RF", "SVM", "GBM", "NN")
+ModelName <- c("Decision Tree", "Random Forest", "Support Vector Machine", "Gradient Boosting Machine", "Neural Network")
+
+RMSE<-c(tree_model_rmse, rf_model_rmse, svm_model_rmse, gbm_model_rmse, ann_model_rmse)
+MAE<-c(tree_model_mae, rf_model_mae, svm_model_mae, gbm_model_mae, ann_model_mae)
+Rsquared <- c(tree_model_r_squared, rf_model_r_squared, svm_model_r_squared, gbm_model_r_squared, ann_model_r_squared)
+MSLE<-c(tree_model_msle, rf_model_msle, svm_model_msle, gbm_model_msle, ann_model_msle)
+
+ml_model_perf <- data.frame(ModelName, RMSE, MAE, Rsquared,MSLE )
+
+datatable(ml_model_perf) %>%
+  formatRound(columns = c("RMSE", "MAE", "Rsquared", "MSLE"), digits = 3)
+
+```
+
+
+
+
+```{r prepare-relative-influence-data, results='hide', fig.show='hide', echo=FALSE}
+
+# Get the summary data frame
+summary_data <- summary(gbm_model, n.trees = best.iter)
+
+rel_inf_data <- data.frame(
+  Variable = summary_data$var,
+  RelativeInfluence = summary_data$rel.inf
+)
+
+rel_inf_data <- data.frame(
+  Variable = summary_data$var,
+  RelativeInfluence = summary_data$rel.inf
+)
+
+# Select only the top 20 features
+top_20_data <- head(rel_inf_data, 20)
+top_20_data
+```
+
+
+
+```{r top20_plot,fig.show='hide', echo =FALSE}
+
+top20_plot <- ggplot(top_20_data, aes(x = reorder(Variable, RelativeInfluence), y = RelativeInfluence, fill = RelativeInfluence)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(
+    title = "Top 20 Predictors of Performance Determined \n by Machine Learning",
+    x = "Features",
+    y = "Relative Importance"
+  ) +
+  guides(fill = "none") +  
+  scale_fill_viridis(option = "D", direction = 1) + 
+  scale_x_discrete(labels = c(
+    "EPIST" = "Epistemic Beliefs",
+    "ENVOPT" = "Environmental Optimism",
+    "ENVAWARE" = "Environmental Awareness",
+    "ESCS" = "Socio Economic Status",
+    "REPEAT.1" = "Repeated Grade",
+    "CPSVALUE" = "Value Cooperation",
+    "DISCLISCI" = "Disciplinary Climate",
+    "FRPL.4" = "Attending Low Poverty School",
+    "JOYSCIE" = "Enjoyment of Science",
+    "INTBRSCI" = "Interest in Broad Science",
+    "SCIEEFF" = "Science Self-efficacy",
+    "SCIEACT" = "Index Science Sctivities",
+    "INSTSCIE" = "Instrumental Motivation",
+    "SMINS" = "Learning Time (Minutes Per Week)",
+    "BELONG" = "Sense of Belonging to School",
+    "UNFAIRTEACHER" = "Teacher Fairness",
+    "ANXTEST" = "Test Anxiety",
+    "BSMJ"= "Expected Occupational Status",
+    "REPEAT" = "Repeated Grade",
+    "SCHSIZE" = "School Size",
+    "TEACHSUP" = "Teacher Support",
+    "unfairteacher"="Teacher Fairness",
+    "MMINS"="Math Instruction Time",
+    "LMINS"="Language Instruction Time",
+    "FRPL" = "Free or Reduced Price Lunch",
+    "STUBEHA" = "Student Behavior Hindering Learning",
+    "COOPERATE" = "Enjoy Cooperation",
+    "GRADE" = "Grade"
+  )) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+    axis.text.y = element_text(size = 10, face = "bold"),
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.title = element_text(size = 12, face = "bold")
+  )
+
+
+top20_plot 
+#ggplotly(top20_plot )
+
+
+```
+
+
+# Hyperparameter Tuning
+
+To optimize the performance of the five machine learning algorithms, hyperparameters were fine-tuned using grid search and 5-fold cross-validation as implemented in the [caret package](https://cran.r-project.org/web/packages/caret/index.html). Hyperparameters were systematically optimized. For DT the complexity parameter was adjusted. For the RF the number of variables randomly sampled at each split was selected. For the SVM the cost and kernel width were set. For the GBM the number of trees, interaction depth, learning rate, and minimum observations per node were configured. For the NN, the number of hidden units and weight decay were specified.
+
+
+```{r tree-model-fine-tuned, results='hide', fig.show='hide', echo=FALSE}
+
+# Define a grid of hyperparameters
+tree_grid <- expand.grid(cp = seq(0.01, 0.1, by = 0.01))
+
+# Train decision tree model with cross-validation
+tree_model_tuned <- train(
+  Science_Score ~ ., 
+  data = train_data_clean, 
+  method = "rpart", 
+  tuneGrid = tree_grid,
+  trControl = trainControl(method = "cv", number = 5)
+)
+
+# Check the best hyperparameters
+print(tree_model_tuned$bestTune)
+
+# Visualize model performance across different cp values
+plot(tree_model_tuned)
+```
+
+
+```{r rf-model-fine-tune, , results='hide', fig.show='hide', echo=FALSE}
+# Define a grid of hyperparameters for random forest
+rf_grid <- expand.grid(mtry = seq(2, ncol(train_data_clean) - 1, by = 2))
+
+# Train random forest model with cross-validation
+rf_model_tuned <- train(
+  Science_Score ~ ., 
+  data = train_data_clean, 
+  method = "rf", 
+  tuneGrid = rf_grid,
+  trControl = trainControl(method = "cv", number = 5),
+  ntree = 100
+)
+
+# Check the best hyperparameters
+print(rf_model_tuned$bestTune)
+
+# Plot variable importance
+varImpPlot(rf_model_tuned$finalModel)
+
+```
+
+
+```{r svm-model-fine-tuned, results='hide', fig.show='hide', echo=FALSE}
+## # Define a grid of hyperparameters for SVM
+svm_grid <- expand.grid(
+  C = seq(0.1, 1, by = 0.1),
+  sigma = seq(0.01, 0.1, by = 0.01)
+)
+
+# Train SVM model with cross-validation
+svm_model_tuned <- train(
+  Science_Score ~ ., 
+  data = train_data_clean, 
+  method = "svmRadial", 
+  tuneGrid = svm_grid,
+  trControl = trainControl(method = "cv", number = 5)
+)
+
+# Check the best hyperparameters
+print(svm_model_tuned$bestTune)
+
+# Plot model performance
+plot(svm_model_tuned)
+```
+
+
+
+```{r gbm-model-fine-tuned,   results='hide', fig.show='hide', echo=FALSE}
+# Define a grid of hyperparameters for GBM
+gbm_grid <- expand.grid(
+  n.trees = seq(100, 1000, by = 100),
+  interaction.depth = c(1, 3, 5),
+  shrinkage = c(0.1, 0.01),
+  n.minobsinnode = c(10, 20)
+)
+
+# Train GBM model with cross-validation
+gbm_model_tuned <- train(
+  Science_Score ~ ., 
+  data = train_data_clean, 
+  method = "gbm", 
+  tuneGrid = gbm_grid,
+  trControl = trainControl(method = "cv", number = 5),
+  verbose = FALSE
+)
+
+# Check the best hyperparameters
+print(gbm_model_tuned$bestTune)
+
+# Plot model performance
+plot(gbm_model_tuned)
+
+```
+
+```{r ann-model-fine-tuned,  , results='hide', fig.show='hide', echo=FALSE}
+# Define a grid of hyperparameters for ANN
+ann_grid <- expand.grid(
+  size = c(5, 10, 15),
+  decay = c(0.1, 0.01, 0.001)
+)
+
+# Train ANN model with cross-validation
+ann_model_tuned <- train(
+  Science_Score ~ ., 
+  data = train_data_clean, 
+  method = "nnet", 
+  tuneGrid = ann_grid,
+  linout = TRUE,
+  trace = FALSE,
+  maxit = 500,
+  trControl = trainControl(method = "cv", number = 5)
+)
+
+# Check the best hyperparameters
+print(ann_model_tuned$bestTune)
+
+# Visualize the network
+
+plotnet(ann_model_tuned$finalModel)
+
+```
+
+After tuning, GBM emerged as the best-performing model(see table below). However, the gain in predictive accuracy over the baseline was modest: R² improved from 0.496 to 0.504, representing a relative increase of approximately 1.6% in explained variance.
+
+```{r, echo =FALSE}
+# Initialize variables to store performance metrics
+#TunedModelName <- c("DT", "RF", "SVM", "GBM", "ANN")
+ModelName <- c("Decision Tree", "Random Forest", "Support Vector Machine", "Gradient Boosting Machine", "Neural Network")
+
+RMSE <- c()
+MAE <- c()
+Rsquared <- c()
+MSLE <- c()
+
+
+tree_predictions <- predict(tree_model_tuned , newdata = test_data_clean)
+RMSE <- c(RMSE, sqrt(mean((tree_predictions - test_data_clean$Science_Score)^2)))
+MAE <- c(MAE, mean(abs(tree_predictions - test_data_clean$Science_Score)))
+Rsquared <- c(Rsquared, cor(tree_predictions, test_data_clean$Science_Score)^2)
+MSLE <- c(MSLE, mean((log(tree_predictions + 1) - log(test_data_clean$Science_Score + 1))^2))
+
+
+rf_predictions <- predict(rf_model_tuned, newdata = test_data_clean)
+RMSE <- c(RMSE, sqrt(mean((rf_predictions - test_data_clean$Science_Score)^2)))
+MAE <- c(MAE, mean(abs(rf_predictions - test_data_clean$Science_Score)))
+Rsquared <- c(Rsquared, cor(rf_predictions, test_data_clean$Science_Score)^2)
+MSLE <- c(MSLE, mean((log(rf_predictions + 1) - log(test_data_clean$Science_Score + 1))^2))
+
+
+svm_predictions <- predict(svm_model_tuned, newdata = test_data_clean)
+RMSE <- c(RMSE, sqrt(mean((svm_predictions - test_data_clean$Science_Score)^2)))
+MAE <- c(MAE, mean(abs(svm_predictions - test_data_clean$Science_Score)))
+Rsquared <- c(Rsquared, cor(svm_predictions, test_data_clean$Science_Score)^2)
+MSLE <- c(MSLE, mean((log(svm_predictions + 1) - log(test_data_clean$Science_Score + 1))^2))
+
+
+gbm_predictions <- predict(gbm_model_tuned, newdata = test_data_clean, n.trees = gbm_model$bestTune$n.trees)
+RMSE <- c(RMSE, sqrt(mean((gbm_predictions - test_data_clean$Science_Score)^2)))
+MAE <- c(MAE, mean(abs(gbm_predictions - test_data_clean$Science_Score)))
+Rsquared <- c(Rsquared, cor(gbm_predictions, test_data_clean$Science_Score)^2)
+MSLE <- c(MSLE, mean((log(gbm_predictions + 1) - log(test_data_clean$Science_Score + 1))^2))
+
+
+ann_predictions <- predict(ann_model_tuned, newdata = test_data_clean, type = "raw")
+RMSE <- c(RMSE, sqrt(mean((ann_predictions - test_data_clean$Science_Score)^2)))
+MAE <- c(MAE, mean(abs(ann_predictions - test_data_clean$Science_Score)))
+Rsquared <- c(Rsquared, cor(ann_predictions, test_data_clean$Science_Score)^2)
+MSLE <- c(MSLE, mean((log(ann_predictions + 1) - log(test_data_clean$Science_Score + 1))^2))
+
+# Combine metrics into a data frame
+ml_model_perf <- data_frame(
+  ModelName = ModelName,
+  RMSE = RMSE,
+  MAE = MAE,
+  Rsquared = Rsquared,
+  MSLE = MSLE
+)
+
+# Print the performance table
+datatable(ml_model_perf) %>%
+  formatRound(columns = c("RMSE", "MAE", "Rsquared", "MSLE"), digits = 3)
+
+
+
+# RMSE Visualization
+ggplot(ml_model_perf, aes(x = ModelName, y = RMSE, fill = ModelName)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Model Comparison - RMSE", x = "Model", y = "RMSE") +
+  theme_minimal()
+
+# R-squared Visualization
+ggplot(ml_model_perf, aes(x = ModelName, y = Rsquared, fill = ModelName)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Model Comparison - R²", x = "Model", y = "R²") +
+  theme_minimal()
+```
+
+
+
+
+The plot below shows the top 20 most influential predictors based on the final GBM model.
+
+
+```{r prepare-relative-influence-data1, results='hide', fig.show='hide', echo=FALSE}
+
+# Get the summary data frame
+summary_data <- summary(gbm_model_tuned, n.trees = best.iter)
+
+rel_inf_data <- data.frame(
+  Variable = summary_data$var,
+  RelativeInfluence = summary_data$rel.inf
+)
+
+rel_inf_data <- data.frame(
+  Variable = summary_data$var,
+  RelativeInfluence = summary_data$rel.inf
+)
+
+# Select only the top 20 features
+top_20_data <- head(rel_inf_data, 20)
+top_20_data
+```
+
+
+
+```{r top20_plot1, echo =FALSE}
+
+top20_plot <- ggplot(top_20_data, aes(x = reorder(Variable, RelativeInfluence), y = RelativeInfluence, fill = RelativeInfluence)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(
+    title = "Top 20 Predictors of Performance Determined \n by Machine Learning",
+    x = "Features",
+    y = "Relative Importance"
+  ) +
+  guides(fill = "none") +  
+  scale_fill_viridis(option = "D", direction = 1) + 
+  scale_x_discrete(labels = c(
+    "EPIST" = "Epistemic Beliefs",
+    "ENVOPT" = "Environmental Optimism",
+    "ENVAWARE" = "Environmental Awareness",
+    "ESCS" = "Socio Economic Status",
+    "REPEAT.1" = "Repeated Grade",
+    "CPSVALUE" = "Value Cooperation",
+    "DISCLISCI" = "Disciplinary Climate",
+    "FRPL.4" = "Attending Low Poverty School",
+    "JOYSCIE" = "Enjoyment of Science",
+    "INTBRSCI" = "Interest in Broad Science",
+    "SCIEEFF" = "Science Self-efficacy",
+    "SCIEACT" = "Index Science Sctivities",
+    "INSTSCIE" = "Instrumental Motivation",
+    "SMINS" = "Learning Time (Minutes Per Week)",
+    "BELONG" = "Sense of Belonging to School",
+    "UNFAIRTEACHER" = "Teacher Fairness",
+    "ANXTEST" = "Test Anxiety",
+    "BSMJ"= "Expected Occupational Status",
+    "REPEAT" = "Repeated Grade",
+    "SCHSIZE" = "School Size",
+    "TEACHSUP" = "Teacher Support",
+    "unfairteacher"="Teacher Fairness",
+    "MMINS"="Math Instruction Time",
+    "LMINS"="Language Instruction Time",
+    "FRPL" = "Free or Reduced Price Lunch",
+    "STUBEHA" = "Student Behavior Hindering Learning",
+    "COOPERATE" = "Enjoy Cooperation",
+    "GRADE" = "Grade"
+  )) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+    axis.text.y = element_text(size = 10, face = "bold"),
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.title = element_text(size = 12, face = "bold")
+  )
+
+
+top20_plot 
+#ggplotly(top20_plot )
+
+
+```
+
+
+
+# Summary and Insights
+
+This study compared performance of five machine learning algorithms- DT), RF,SVM, GBM and ANN - to predict science performance among U.S. 15-year-old students using the PISA 2015 dataset. The results revealed several important insights:
+  
+  - GBM emerged as the best-performing model with the lowest Root Mean Squared Error (RMSE) and highest R² among all models. 
+- Random Forest and SVM also showed competitive performance, with moderate RMSE and solid R² values.  
+- Decision Tree and ANN underperformed relative to other models. 
+- 90% the  top predictors identified are malleable educational or psychological factors. Thus, the results provide actionable guidance for educators and policymakers aiming to boost science outcomes through targeted interventions.
+- Overall, these findings reinforce the value of using advanced machine learning techniques in educational research. 
+
+
+# References
+- Bronfenbrenner, U., & Morris, P. A. (2007). The bioecological model of human development. _Handbook of child psychology_, 1.
+https://doi.org/10.1002/9780470147658.chpsy0114
+
+- Hattie, J. (2012). _Visible learning for teachers: Maximizing impact on learning_. Routledge.
+https://doi.org/10.4324/9780203181522
+
+- Hitt, D. H., & Tucker, P. D. (2016). Systematic Review of Key Leader Practices Found to Influence Student Achievement: A Unified Framework. _Review of Educational Research_, 86(2), 531-569. https://doi.org/10.3102/0034654315614911 (Original work published 2016)
+
+- Kyriakides, L., Creemers, B., Charalambous, E. (2018). The Impact of Student Characteristics on Student Achievement: A Review of the Literature. In: _Equity and Quality Dimensions in Educational Effectiveness. Policy Implications of Research in Education_, vol 8. Springer, Cham. https://doi.org/10.1007/978-3-319-72066-1_2
+
+
+- Zhang, F., & Bae, C. L. (2020). Motivational factors that influence student science achievement: A systematic literature review of TIMSS studies. _International Journal of Science Education_, 42(17), 2921–2944. https://doi.org/10.1080/09500693.2020.1843083
+
+
+
+<a href="#page-title" style="font-size: 20px; font-weight: bold; color: white; position: fixed; right: 20px; bottom: 20px; background-color: green; padding: 10px 15px; border-radius: 5px; box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.2); text-decoration: none;">
+  Back to Top
+</a>
+  
+  
+  
+  <a href="https://wondimuahmed.github.io/Portfolio/" style="font-size: 20px; font-weight: bold; color:white; position: fixed; left: 20%; bottom: 20px; background-color: #007BFF; padding: 10px 15px; border-radius: 5px; box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.2); text-decoration: none;">
+  Back to Portfolio
+</a>
+  
